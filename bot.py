@@ -16,7 +16,7 @@ from googleapiclient.http import MediaFileUpload
 # Настройка логирования
 logging.basicConfig(
     filename="/tmp/schedule_bot.log",
-    level=logging.INFO,
+    level=logging.DEBUG,  # Изменили на DEBUG для большей детализации
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("bot")
@@ -68,7 +68,6 @@ DAY_RANGES = ["7-18", "20-31", "33-44", "46-57", "59-70", "72-83"]
 GROUP_UNIONS = {
     ("101", "102"): "101-102",
     ("103", "104"): "103-104",
-    # Добавьте другие объединения групп, если есть
 }
 
 # Инициализация FastAPI
@@ -117,8 +116,8 @@ def contains_teacher_name(cell_value, teacher_name):
 
 def get_group_list(ws, merge_area, group_col_set):
     group_list = []
-    start_col, start_row = merge_area[0][0].column, merge_area[0][0].row
-    end_col = merge_area[0][-1].column
+    start_col, start_row = merge_area.min_col, merge_area.min_row
+    end_col = merge_area.max_col
     for col in range(start_col, end_col + 1):
         if col in group_col_set:
             group_name = ws.cell(row=start_row - 2, column=col).value
@@ -167,7 +166,7 @@ def process_course(ws, teacher_name, group_columns, time_column, schedule_data):
                         cell_value = ws.cell(row=start_row, column=start_col).value
                         logger.debug(f"Column {col}, cell value: {cell_value}")
                         if cell_value and contains_teacher_name(cell_value, teacher_name):
-                            group_list = get_group_list(ws, [(ws.cell(row=start_row, column=c), c) for c in range(start_col, merge_area.max_col + 1)], group_col_set)
+                            group_list = get_group_list(ws, merge_area, group_col_set)
                             group_name = get_union_name(group_list, GROUP_UNIONS)
                             subject = ws.cell(row=row, column=start_col).value or "JOQ"
                             audience = get_audience(ws, row, start_col + (merge_area.max_col - start_col), group_columns)
@@ -183,7 +182,7 @@ def process_course(ws, teacher_name, group_columns, time_column, schedule_data):
 
 def process_working_schedule(file_path, temp_file_path):
     try:
-        file_size = os.path.getsize(file_path) / (1024 * 1024)  # Размер в МБ
+        file_size = os.path.getsize(file_path) / (1024 * 1024)
         logger.info(f"Processing file {file_path}, size: {file_size:.2f} MB")
         if file_size > 50:
             logger.error("File too large for processing")
@@ -228,8 +227,10 @@ def create_temp_schedule_file(df, temp_file_path):
 # Функции Telegram бота
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    logger.debug(f"Received /start from user {user_id}")
     if user_id not in ALLOWED_USERS:
         await update.message.reply_text("Sizge ruxsat joq!")
+        logger.warning(f"Unauthorized access by user {user_id}")
         return
     keyboard = [
         [InlineKeyboardButton("Oqıtıwshı", callback_data="teacher")],
@@ -243,8 +244,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+    logger.debug(f"Received button callback from user {user_id}: {query.data}")
     if user_id not in ALLOWED_USERS:
         await query.message.reply_text("Sizge ruxsat joq!")
+        logger.warning(f"Unauthorized access by user {user_id}")
         return
     role = query.data
     context.user_data["role"] = role
@@ -256,16 +259,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    logger.debug(f"Received text from user {user_id}: {update.message.text}")
     if user_id not in ALLOWED_USERS:
         await update.message.reply_text("Sizge ruxsat joq!")
+        logger.warning(f"Unauthorized access by user {user_id}")
         return
     role = context.user_data.get("role")
     if not role:
         await update.message.reply_text("Aldın rolińizdi tańlań (/start)!")
+        logger.warning(f"User {user_id} sent text without selecting role")
         return
     text = update.message.text.strip()
     if role == "teacher" and text not in TEACHER_NAMES:
         await update.message.reply_text("Bunday oqıtıwshı tabılmadı. Qaytadan jazıń:")
+        logger.warning(f"User {user_id} entered invalid teacher name: {text}")
         return
     context.user_data["identifier"] = text
     keyboard = [
@@ -281,18 +288,22 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+    logger.debug(f"Received schedule callback from user {user_id}: {query.data}")
     if user_id not in ALLOWED_USERS:
         await query.message.reply_text("Sizge ruxsat joq!")
+        logger.warning(f"Unauthorized access by user {user_id}")
         return
     role = context.user_data.get("role")
     identifier = context.user_data.get("identifier")
     if not role or not identifier:
         await query.message.reply_text("Aldın rolińizdi hám identifikatorıńızdi tańlań (/start)!")
+        logger.warning(f"User {user_id} requested schedule without role/identifier")
         return
     
     file_path = download_latest_from_drive()
     if not file_path:
         await query.message.reply_text("Keste faylı tabılmadı!")
+        logger.warning(f"No schedule file found for user {user_id}")
         return
     
     try:
@@ -325,6 +336,7 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if df_filtered.empty:
             await query.message.reply_text("Bul kúnge keste joq!")
+            logger.info(f"No schedule found for user {user_id}, {query.data}")
             return
         
         response = []
@@ -350,13 +362,16 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    logger.debug(f"Received document from user {user_id}: {update.message.document.file_name}")
     if user_id not in ALLOWED_USERS:
         await update.message.reply_text("Sizge ruxsat joq!")
+        logger.warning(f"Unauthorized access by user {user_id}")
         return
     
     document = update.message.document
     if not document.file_name.endswith((".xlsx", ".xls")):
         await update.message.reply_text("Tek xlsx yamasa xls fayllar qabillaytuǵın!")
+        logger.warning(f"User {user_id} uploaded non-Excel file: {document.file_name}")
         return
     
     file_name = document.file_name
@@ -389,20 +404,36 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # FastAPI эндпоинт для webhook
 @app.post("/{token}")
 async def telegram_webhook(token: str, request: Request):
+    logger.debug("Received webhook request")
     if token != BOT_TOKEN:
+        logger.error(f"Invalid token: {token}")
         raise HTTPException(status_code=403, detail="Invalid token")
-    update = await request.json()
-    await application.update_queue.put(Update.de_json(update, application.bot))
-    return {"ok": True}
+    try:
+        update = await request.json()
+        logger.debug(f"Webhook update: {update}")
+        await application.update_queue.put(Update.de_json(update, application.bot))
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"Error processing webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Инициализация бота
-def main():
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    logger.info("Bot initialized")
-    application.run_polling()
+async def main():
+    try:
+        logger.info("Initializing bot")
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(button_callback))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+        await application.initialize()
+        await application.start()
+        logger.info("Bot initialized and running")
+    except Exception as e:
+        logger.error(f"Error initializing bot: {str(e)}")
+        raise
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    import asyncio
+    asyncio.run(main())
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
