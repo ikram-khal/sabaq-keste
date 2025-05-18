@@ -1,0 +1,8 @@
+pandas
+openpyxl
+python-telegram-bot==20.0
+fastapi
+uvicorn
+google-auth
+google-api-python-client
+python-dotenv
