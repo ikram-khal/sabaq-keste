@@ -16,7 +16,7 @@ from googleapiclient.http import MediaFileUpload
 # Настройка логирования
 logging.basicConfig(
     filename="/tmp/schedule_bot.log",
-    level=logging.DEBUG,  # Изменили на DEBUG для большей детализации
+    level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("bot")
@@ -74,36 +74,44 @@ GROUP_UNIONS = {
 app = FastAPI()
 
 # Инициализация Telegram бота
-application = Application.builder().token(BOT_TOKEN).build()
+application = None
 
 # Функции для работы с Google Drive
 def upload_to_drive(file_path, file_name):
-    drive_service = get_drive_service()
-    file_metadata = {
-        "name": file_name,
-        "parents": [DRIVE_FOLDER_ID]
-    }
-    media = MediaFileUpload(file_path, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-    logger.info(f"Uploaded {file_name} to Google Drive, ID: {file.get('id')}")
-    return file.get("id")
+    try:
+        drive_service = get_drive_service()
+        file_metadata = {
+            "name": file_name,
+            "parents": [DRIVE_FOLDER_ID]
+        }
+        media = MediaFileUpload(file_path, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+        logger.info(f"Uploaded {file_name} to Google Drive, ID: {file.get('id')}")
+        return file.get("id")
+    except Exception as e:
+        logger.error(f"Error uploading to Google Drive: {str(e)}")
+        raise
 
 def download_latest_from_drive():
-    drive_service = get_drive_service()
-    query = f"'{DRIVE_FOLDER_ID}' in parents and name contains 'keste_bot_orig_'"
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    files = results.get("files", [])
-    if not files:
-        logger.warning("No schedule files found in Google Drive")
-        return None
-    latest_file = max(files, key=lambda x: x["name"])
-    file_id = latest_file["id"]
-    request = drive_service.files().get_media(fileId=file_id)
-    file_path = os.path.join(DATA_DIR, latest_file["name"])
-    with open(file_path, "wb") as f:
-        f.write(request.execute())
-    logger.info(f"Downloaded latest schedule: {latest_file['name']}")
-    return file_path
+    try:
+        drive_service = get_drive_service()
+        query = f"'{DRIVE_FOLDER_ID}' in parents and name contains 'keste_bot_orig_'"
+        results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get("files", [])
+        if not files:
+            logger.warning("No schedule files found in Google Drive")
+            return None
+        latest_file = max(files, key=lambda x: x["name"])
+        file_id = latest_file["id"]
+        request = drive_service.files().get_media(fileId=file_id)
+        file_path = os.path.join(DATA_DIR, latest_file["name"])
+        with open(file_path, "wb") as f:
+            f.write(request.execute())
+        logger.info(f"Downloaded latest schedule: {latest_file['name']}")
+        return file_path
+    except Exception as e:
+        logger.error(f"Error downloading from Google Drive: {str(e)}")
+        raise
 
 # Функции обработки расписания
 def create_column_set(group_columns):
@@ -404,30 +412,42 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # FastAPI эндпоинт для webhook
 @app.post("/{token}")
 async def telegram_webhook(token: str, request: Request):
-    logger.debug("Received webhook request")
+    logger.debug(f"Received webhook request with token: {token}")
     if token != BOT_TOKEN:
         logger.error(f"Invalid token: {token}")
         raise HTTPException(status_code=403, detail="Invalid token")
     try:
         update = await request.json()
-        logger.debug(f"Webhook update: {update}")
+        logger.debug(f"Webhook update: {json.dumps(update, indent=2)}")
+        if application is None:
+            logger.error("Application not initialized")
+            raise HTTPException(status_code=500, detail="Bot not initialized")
         await application.update_queue.put(Update.de_json(update, application.bot))
+        logger.debug("Update added to queue")
         return {"ok": True}
     except Exception as e:
         logger.error(f"Error processing webhook: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Инициализация бота
-async def main():
+# FastAPI эндпоинт для корневого URL (для UptimeRobot и тестов)
+@app.get("/")
+async def root():
+    logger.debug("Received GET request to root")
+    return {"message": "Telegram bot is running"}
+
+# Инициализация и запуск
+async def init_bot():
+    global application
     try:
-        logger.info("Initializing bot")
+        logger.info("Initializing Telegram Application")
+        application = Application.builder().token(BOT_TOKEN).build()
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CallbackQueryHandler(button_callback))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
         application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
         await application.initialize()
         await application.start()
-        logger.info("Bot initialized and running")
+        logger.info("Bot initialized successfully")
     except Exception as e:
         logger.error(f"Error initializing bot: {str(e)}")
         raise
@@ -435,5 +455,12 @@ async def main():
 if __name__ == "__main__":
     import uvicorn
     import asyncio
-    asyncio.run(main())
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    
+    # Запуск бота и FastAPI
+    try:
+        logger.info("Starting application")
+        asyncio.run(init_bot())
+        uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    except Exception as e:
+        logger.error(f"Error starting application: {str(e)}")
+        raise
