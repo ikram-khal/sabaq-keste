@@ -4,6 +4,8 @@ import base64
 import json
 import traceback
 import sys
+import asyncio
+import aiohttp
 from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -16,15 +18,50 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("/tmp/schedule_bot.log"),
-        logging.StreamHandler(sys.stderr)
-    ]
-)
+logger = logging.getLogger("bot _
+
+System: It looks like the artifact content was cut off. I'll provide the complete updated version of `bot.py` with the intended changes to address the initialization issue, enhance logging, and ensure compatibility with Render. The code will include:
+
+1. Detailed logging for `init_bot` to pinpoint the initialization failure.
+2. A pre-check for `BOT_TOKEN` validity using an HTTP request to Telegram's `getMe` endpoint.
+3. Simplified async structure to avoid conflicts between `uvicorn` and `Application`.
+4. Dual logging to `/tmp/schedule_bot.log` and `stderr` for visibility in Render Dashboard.
+5. Retention of all previous functionality (handling `Sabaq_keste_DELL.xlsx`, Google Drive integration, etc.).
+
+<xaiArtifact artifact_id="46c6e965-54fd-4515-ad5a-d8e8a3678da2" artifact_version_id="753328a3-d9ec-4420-bafb-892f332f056c" title="bot.py" contentType="text/python">
+import os
+import logging
+import base64
+import json
+import traceback
+import sys
+import asyncio
+import aiohttp
+from datetime import datetime
+from fastapi import FastAPI, Request, HTTPException
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from dotenv import load_dotenv
+import pandas as pd
+import openpyxl
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+# Настройка логирования
 logger = logging.getLogger("bot")
+logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+# Логи в файл
+file_handler = logging.FileHandler("/tmp/schedule_bot.log")
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# Логи в stderr для Render
+stream_handler = logging.StreamHandler(sys.stderr)
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -42,9 +79,21 @@ if not BOT_TOKEN:
 # Создание директории для данных
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Инициализация FastAPI
-app = FastAPI()
-bot_application = None
+# Проверка BOT_TOKEN
+async def verify_bot_token(token):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.telegram.org/bot{token}/getMe") as response:
+                data = await response.json()
+                logger.debug(f"getMe response: {json.dumps(data, indent=2)}")
+                if data.get("ok") and data.get("result"):
+                    logger.info("BOT_TOKEN verified successfully")
+                    return True
+                logger.error(f"Invalid BOT_TOKEN: {data}")
+                return False
+    except Exception as e:
+        logger.error(f"Error verifying BOT_TOKEN: {str(e)}\n{traceback.format_exc()}")
+        return False
 
 # Инициализация Google Drive API
 def get_drive_service():
@@ -78,6 +127,12 @@ GROUP_UNIONS = {
     ("101", "102"): "101-102",
     ("103", "104"): "103-104",
 }
+
+# Инициализация FastAPI
+app = FastAPI()
+
+# Инициализация Telegram бота
+application = None
 
 # Функции для работы с Google Drive
 def upload_to_drive(file_path, file_name):
@@ -412,32 +467,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(path)
                 logger.info(f"Removed temporary file: {path}")
 
-@app.on_event("startup")
-async def startup_event():
-    global bot_application
-    try:
-        logger.info("Initializing Telegram Application")
-        bot_application = Application.builder().token(BOT_TOKEN).build()
-        bot_application.add_handler(CommandHandler("start", start))
-        bot_application.add_handler(CallbackQueryHandler(button_callback))
-        bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-        bot_application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-        
-        await bot_application.initialize()
-        await bot_application.start()
-        logger.info("Bot initialized successfully")
-    except Exception as e:
-        logger.error(f"Error initializing bot: {str(e)}\n{traceback.format_exc()}")
-        raise
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    if bot_application:
-        logger.info("Shutting down bot application")
-        await bot_application.stop()
-        await bot_application.shutdown()
-        logger.info("Bot application stopped")
-
+# FastAPI эндпоинт для webhook
 @app.post("/{token}")
 async def telegram_webhook(token: str, request: Request):
     logger.debug(f"Received webhook request with token: {token}")
@@ -447,22 +477,70 @@ async def telegram_webhook(token: str, request: Request):
     try:
         update = await request.json()
         logger.debug(f"Webhook update: {json.dumps(update, indent=2)}")
-        if not bot_application:
+        if application is None:
             logger.error("Application not initialized")
             raise HTTPException(status_code=500, detail="Bot not initialized")
-        
-        await bot_application.update_queue.put(Update.de_json(update, bot_application.bot))
+        await application.update_queue.put(Update.de_json(update, application.bot))
         logger.debug("Update added to queue")
         return {"ok": True}
     except Exception as e:
         logger.error(f"Error processing webhook: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Webhook error: {str(e)}")
 
+# FastAPI эндпоинт для корневого URL
 @app.get("/")
 async def root():
     logger.debug("Received GET request to root")
-    return {"message": "Telegram bot is running", "status": "OK"}
+    return {"message": "Telegram bot is running"}
+
+# Проверка зависимостей
+def check_dependencies():
+    try:
+        import telegram
+        import fastapi
+        import uvicorn
+        import aiohttp
+        logger.info(f"Dependencies: telegram={telegram.__version__}, fastapi={fastapi.__version__}, uvicorn={uvicorn.__version__}, aiohttp={aiohttp.__version__}")
+    except ImportError as e:
+        logger.error(f"Missing dependency: {str(e)}\n{traceback.format_exc()}")
+        raise
+
+# Инициализация и запуск
+async def init_bot():
+    global application
+    try:
+        logger.info("Checking dependencies")
+        check_dependencies()
+        logger.info("Verifying BOT_TOKEN")
+        if not await verify_bot_token(BOT_TOKEN):
+            raise ValueError("Invalid BOT_TOKEN")
+        logger.info("Initializing Telegram Application")
+        application = Application.builder().token(BOT_TOKEN).build()
+        logger.info("Adding handlers")
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(button_callback))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+        logger.info("Initializing application")
+        await application.initialize()
+        logger.info("Starting application")
+        await application.start()
+        logger.info("Bot initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing bot: {str(e)}\n{traceback.format_exc()}")
+        raise
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    
+    async def main():
+        try:
+            logger.info("Starting application")
+            await init_bot()
+            logger.info("Running Uvicorn server")
+            uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+        except Exception as e:
+            logger.error(f"Error starting application: {str(e)}\n{traceback.format_exc()}")
+            raise
+    
+    asyncio.run(main())
