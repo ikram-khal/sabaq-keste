@@ -16,19 +16,15 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("/tmp/schedule_bot.log"),
+        logging.StreamHandler(sys.stderr)
+    ]
+)
 logger = logging.getLogger("bot")
-logger.setLevel(logging.DEBUG)
-formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-
-# Логи в файл
-file_handler = logging.FileHandler("/tmp/schedule_bot.log")
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
-
-# Логи в stderr для Render
-stream_handler = logging.StreamHandler(sys.stderr)
-stream_handler.setFormatter(formatter)
-logger.addHandler(stream_handler)
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -45,6 +41,10 @@ if not BOT_TOKEN:
 
 # Создание директории для данных
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# Инициализация FastAPI
+app = FastAPI()
+bot_application = None
 
 # Инициализация Google Drive API
 def get_drive_service():
@@ -78,12 +78,6 @@ GROUP_UNIONS = {
     ("101", "102"): "101-102",
     ("103", "104"): "103-104",
 }
-
-# Инициализация FastAPI
-app = FastAPI()
-
-# Инициализация Telegram бота
-application = None
 
 # Функции для работы с Google Drive
 def upload_to_drive(file_path, file_name):
@@ -418,7 +412,32 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(path)
                 logger.info(f"Removed temporary file: {path}")
 
-# FastAPI эндпоинт для webhook
+@app.on_event("startup")
+async def startup_event():
+    global bot_application
+    try:
+        logger.info("Initializing Telegram Application")
+        bot_application = Application.builder().token(BOT_TOKEN).build()
+        bot_application.add_handler(CommandHandler("start", start))
+        bot_application.add_handler(CallbackQueryHandler(button_callback))
+        bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        bot_application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+        
+        await bot_application.initialize()
+        await bot_application.start()
+        logger.info("Bot initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing bot: {str(e)}\n{traceback.format_exc()}")
+        raise
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if bot_application:
+        logger.info("Shutting down bot application")
+        await bot_application.stop()
+        await bot_application.shutdown()
+        logger.info("Bot application stopped")
+
 @app.post("/{token}")
 async def telegram_webhook(token: str, request: Request):
     logger.debug(f"Received webhook request with token: {token}")
@@ -428,64 +447,22 @@ async def telegram_webhook(token: str, request: Request):
     try:
         update = await request.json()
         logger.debug(f"Webhook update: {json.dumps(update, indent=2)}")
-        if application is None:
+        if not bot_application:
             logger.error("Application not initialized")
             raise HTTPException(status_code=500, detail="Bot not initialized")
-        await application.update_queue.put(Update.de_json(update, application.bot))
+        
+        await bot_application.update_queue.put(Update.de_json(update, bot_application.bot))
         logger.debug("Update added to queue")
         return {"ok": True}
     except Exception as e:
         logger.error(f"Error processing webhook: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Webhook error: {str(e)}")
 
-# FastAPI эндпоинт для корневого URL
 @app.get("/")
 async def root():
     logger.debug("Received GET request to root")
-    return {"message": "Telegram bot is running"}
-
-# Проверка зависимостей
-def check_dependencies():
-    try:
-        import telegram
-        import fastapi
-        import uvicorn
-        logger.info(f"Dependencies: telegram={telegram.__version__}, fastapi={fastapi.__version__}, uvicorn={uvicorn.__version__}")
-    except ImportError as e:
-        logger.error(f"Missing dependency: {str(e)}")
-        raise
-
-# Инициализация и запуск
-async def init_bot():
-    global application
-    try:
-        logger.info("Checking dependencies")
-        check_dependencies()
-        logger.info("Initializing Telegram Application")
-        application = Application.builder().token(BOT_TOKEN).build()
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(button_callback))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-        application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-        await application.initialize()
-        await application.start()
-        logger.info("Bot initialized successfully")
-    except Exception as e:
-        logger.error(f"Error initializing bot: {str(e)}\n{traceback.format_exc()}")
-        raise
+    return {"message": "Telegram bot is running", "status": "OK"}
 
 if __name__ == "__main__":
     import uvicorn
-    import asyncio
-    
-    async def main():
-        try:
-            logger.info("Starting application")
-            await init_bot()
-            logger.info("Running Uvicorn server")
-            uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-        except Exception as e:
-            logger.error(f"Error starting application: {str(e)}\n{traceback.format_exc()}")
-            raise
-    
-    asyncio.run(main())
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
