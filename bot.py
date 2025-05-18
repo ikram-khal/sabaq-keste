@@ -2,6 +2,7 @@ import os
 import logging
 import base64
 import json
+import traceback
 from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -45,7 +46,7 @@ def get_drive_service():
         creds = Credentials.from_service_account_info(creds_dict, scopes=["https://www.googleapis.com/auth/drive"])
         return build("drive", "v3", credentials=creds)
     except Exception as e:
-        logger.error(f"Ошибка инициализации Google Drive: {str(e)}")
+        logger.error(f"Ошибка инициализации Google Drive: {str(e)}\n{traceback.format_exc()}")
         raise
 
 # Параметры расписания
@@ -89,7 +90,7 @@ def upload_to_drive(file_path, file_name):
         logger.info(f"Uploaded {file_name} to Google Drive, ID: {file.get('id')}")
         return file.get("id")
     except Exception as e:
-        logger.error(f"Error uploading to Google Drive: {str(e)}")
+        logger.error(f"Error uploading to Google Drive: {str(e)}\n{traceback.format_exc()}")
         raise
 
 def download_latest_from_drive():
@@ -110,7 +111,7 @@ def download_latest_from_drive():
         logger.info(f"Downloaded latest schedule: {latest_file['name']}")
         return file_path
     except Exception as e:
-        logger.error(f"Error downloading from Google Drive: {str(e)}")
+        logger.error(f"Error downloading from Google Drive: {str(e)}\n{traceback.format_exc()}")
         raise
 
 # Функции обработки расписания
@@ -220,7 +221,7 @@ def process_working_schedule(file_path, temp_file_path):
             return False
         return True
     except Exception as e:
-        logger.error(f"Error processing working schedule: {str(e)}")
+        logger.error(f"Error processing working schedule: {str(e)}\n{traceback.format_exc()}")
         return False
 
 def create_temp_schedule_file(df, temp_file_path):
@@ -229,7 +230,7 @@ def create_temp_schedule_file(df, temp_file_path):
         logger.info(f"Temporary schedule file created: {temp_file_path}")
         return True
     except Exception as e:
-        logger.error(f"Error creating temporary file {temp_file_path}: {str(e)}")
+        logger.error(f"Error creating temporary file {temp_file_path}: {str(e)}\n{traceback.format_exc()}")
         return False
 
 # Функции Telegram бота
@@ -361,7 +362,7 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("\n".join(response))
         logger.info(f"User {user_id} requested schedule: {query.data}")
     except Exception as e:
-        logger.error(f"Error generating schedule: {str(e)}")
+        logger.error(f"Error generating schedule: {str(e)}\n{traceback.format_exc()}")
         await query.message.reply_text("Kesteni kóriwde qáte ketti!")
     finally:
         if os.path.exists(file_path):
@@ -401,7 +402,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Qátelik! Fayl óńdelmedi, mazmunı bo's yamasa qáte bar.")
             logger.error("Failed to process uploaded file")
     except Exception as e:
-        logger.error(f"Error handling document: {str(e)}")
+        logger.error(f"Error handling document: {str(e)}\n{traceback.format_exc()}")
         await update.message.reply_text("Fayl júklewde qáte ketti!")
     finally:
         for path in [local_path, temp_file_path]:
@@ -426,10 +427,10 @@ async def telegram_webhook(token: str, request: Request):
         logger.debug("Update added to queue")
         return {"ok": True}
     except Exception as e:
-        logger.error(f"Error processing webhook: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error processing webhook: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Webhook error: {str(e)}")
 
-# FastAPI эндпоинт для корневого URL (для UptimeRobot и тестов)
+# FastAPI эндпоинт для корневого URL
 @app.get("/")
 async def root():
     logger.debug("Received GET request to root")
@@ -449,18 +450,20 @@ async def init_bot():
         await application.start()
         logger.info("Bot initialized successfully")
     except Exception as e:
-        logger.error(f"Error initializing bot: {str(e)}")
+        logger.error(f"Error initializing bot: {str(e)}\n{traceback.format_exc()}")
         raise
 
 if __name__ == "__main__":
     import uvicorn
     import asyncio
     
-    # Запуск бота и FastAPI
-    try:
-        logger.info("Starting application")
-        asyncio.run(init_bot())
-        uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
-    except Exception as e:
-        logger.error(f"Error starting application: {str(e)}")
-        raise
+    async def main():
+        try:
+            logger.info("Starting application")
+            await init_bot()
+            uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+        except Exception as e:
+            logger.error(f"Error starting application: {str(e)}\n{traceback.format_exc()}")
+            raise
+    
+    asyncio.run(main())
