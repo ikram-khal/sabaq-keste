@@ -3,6 +3,7 @@ import logging
 import base64
 import json
 import traceback
+import sys
 from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,12 +16,19 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # Настройка логирования
-logging.basicConfig(
-    filename="/tmp/schedule_bot.log",
-    level=logging.DEBUG,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
 logger = logging.getLogger("bot")
+logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+# Логи в файл
+file_handler = logging.FileHandler("/tmp/schedule_bot.log")
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# Логи в stderr для Render
+stream_handler = logging.StreamHandler(sys.stderr)
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -436,10 +444,23 @@ async def root():
     logger.debug("Received GET request to root")
     return {"message": "Telegram bot is running"}
 
+# Проверка зависимостей
+def check_dependencies():
+    try:
+        import telegram
+        import fastapi
+        import uvicorn
+        logger.info(f"Dependencies: telegram={telegram.__version__}, fastapi={fastapi.__version__}, uvicorn={uvicorn.__version__}")
+    except ImportError as e:
+        logger.error(f"Missing dependency: {str(e)}")
+        raise
+
 # Инициализация и запуск
 async def init_bot():
     global application
     try:
+        logger.info("Checking dependencies")
+        check_dependencies()
         logger.info("Initializing Telegram Application")
         application = Application.builder().token(BOT_TOKEN).build()
         application.add_handler(CommandHandler("start", start))
@@ -461,6 +482,7 @@ if __name__ == "__main__":
         try:
             logger.info("Starting application")
             await init_bot()
+            logger.info("Running Uvicorn server")
             uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
         except Exception as e:
             logger.error(f"Error starting application: {str(e)}\n{traceback.format_exc()}")
