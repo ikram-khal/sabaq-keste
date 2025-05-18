@@ -142,7 +142,7 @@ class Database:
                 INSERT OR REPLACE INTO users 
                 (user_id, role, teacher_name, group_name, notifications)
                 VALUES (?, ?, ?, ?, ?)
-            """, (
+            """), (
                 user_id,
                 user_data.role,
                 user_data.teacher_name,
