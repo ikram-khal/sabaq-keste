@@ -97,21 +97,31 @@ class Database:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS original_schedule (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    Kun TEXT, Jupliq INTEGER, Topar TEXT,
-                    Pan TEXT, Oqitiwshi TEXT, Kabinet TEXT
+                    Kun TEXT, 
+                    Jupliq INTEGER, 
+                    Topar TEXT,
+                    Pan TEXT, 
+                    Oqitiwshi TEXT, 
+                    Kabinet TEXT
                 )
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS changes_schedule (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    Kun TEXT, Jupliq INTEGER, Topar TEXT,
-                    Pan TEXT, Oqitiwshi TEXT, Kabinet TEXT
+                    Kun TEXT, 
+                    Jupliq INTEGER, 
+                    Topar TEXT,
+                    Pan TEXT, 
+                    Oqitiwshi TEXT, 
+                    Kabinet TEXT
                 )
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
-                    role TEXT, teacher_name TEXT, group_name TEXT,
+                    role TEXT, 
+                    teacher_name TEXT, 
+                    group_name TEXT,
                     notifications INTEGER DEFAULT 1
                 )
             """)
@@ -157,174 +167,37 @@ class Database:
 
 db = Database(config.DB_FILE)
 
-# ==================== Google Drive ====================
-class DriveService:
-    def __init__(self, credentials: str, folder_id: str):
-        self.credentials = credentials
-        self.folder_id = folder_id
-        self.service = self._init_service()
-
-    def _init_service(self) -> build:
-        try:
-            creds_json = base64.b64decode(self.credentials).decode("utf-8")
-            creds_dict = json.loads(creds_json)
-            credentials = Credentials.from_service_account_info(
-                creds_dict, scopes=["https://www.googleapis.com/auth/drive"]
-            )
-            return build("drive", "v3", credentials=credentials)
-        except Exception as e:
-            logger.error(f"Google Drive init error: {e}")
-            raise
-
-    def upload_file(self, file_path: str) -> Optional[str]:
-        try:
-            file_name = os.path.basename(file_path)
-            file_metadata = {
-                "name": file_name,
-                "parents": [self.folder_id]
-            }
-            media = MediaFileUpload(file_path)
-            file = self.service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields="id"
-            ).execute()
-            return file.get("id")
-        except Exception as e:
-            logger.error(f"Upload error: {e}")
-            return None
-
-    def download_latest(self, prefix: str) -> Optional[str]:
-        try:
-            results = self.service.files().list(
-                q=f"'{self.folder_id}' in parents and name contains '{prefix}'",
-                orderBy="createdTime desc",
-                pageSize=1,
-                fields="files(id, name)"
-            ).execute()
-            
-            if not (files := results.get("files", [])):
-                return None
-
-            file_path = os.path.join(config.DATA_DIR, files[0]["name"])
-            request = self.service.files().get_media(fileId=files[0]["id"])
-            
-            with io.FileIO(file_path, "wb") as fh:
-                downloader = MediaIoBaseDownload(fh, request)
-                while not downloader.next_chunk()[1]:
-                    pass
-            
-            return file_path
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            return None
-
-drive = DriveService(config.DRIVE_CREDENTIALS, config.DRIVE_FOLDER_ID) if config.DRIVE_CREDENTIALS else None
-
-# ==================== Обработка Excel ====================
-class ScheduleProcessor:
-    @staticmethod
-    def process_working_schedule(file_path: str) -> Optional[pd.DataFrame]:
-        try:
-            wb = openpyxl.load_workbook(file_path, data_only=True)
-            ws = wb.active
-            schedule_data = []
-
-            for teacher in TEACHER_NAMES:
-                ScheduleProcessor._process_course(ws, teacher, GROUP_COLUMNS["first_course"], 3, schedule_data)
-                ScheduleProcessor._process_course(ws, teacher, GROUP_COLUMNS["second_course"], 32, schedule_data)
-
-            if not schedule_data:
-                return None
-
-            return pd.DataFrame(schedule_data)[["Kun", "Jupliq", "Topar", "Pan", "Oqitiwshi", "Kabinet"]]
-        except Exception as e:
-            logger.error(f"Schedule processing error: {e}")
-            return None
-
-    @staticmethod
-    def _process_course(ws, teacher: str, columns: List[int], time_col: int, result: List[dict]):
-        for day_idx, day_range in enumerate(DAY_RANGES):
-            day = DAY_NAMES[day_idx]
-            start, end = map(int, day_range.split("-"))
-            
-            for row in range(start, end + 1):
-                time = ws.cell(row=row, column=time_col).value or "JOQ"
-                
-                for col in columns:
-                    cell = ws.cell(row=row + 1, column=col)
-                    if cell.is_merged and cell.merge_area[0][0].column == col:
-                        if cell.value and teacher.lower() in str(cell.value).lower():
-                            result.append({
-                                "Oqitiwshi": teacher,
-                                "Kun": day,
-                                "Jupliq": time,
-                                "Topar": ws.cell(row=3, column=col).value or "",
-                                "Pan": ws.cell(row=row, column=col).value or "JOQ",
-                                "Kabinet": ws.cell(row=row, column=col + 1).value or "JOQ"
-                            })
-
-# ==================== Telegram Bot ====================
-class TelegramBot:
-    def __init__(self):
-        self.app = None
-        self.bot_data = BotData()
-        self._init_handlers()
-
-    async def initialize(self):
-        self.app = Application.builder().token(config.TOKEN).build()
-        self.app.bot_data["bot_data"] = self.bot_data
-        self._setup_handlers()
-        await self._restore_data()
-        await self.app.initialize()
-        await self.app.start()
-
-    async def shutdown(self):
-        if self.app:
-            await self.app.shutdown()
-
-    def _init_handlers(self):
-        self.handlers = [
-            CommandHandler("start", self._start),
-            CommandHandler("notify_on", self._notify_on),
-            CommandHandler("notify_off", self._notify_off),
-            MessageHandler(filters.Regex(r"^(Oqıtıwshı|Student)$"), self._handle_role),
-            MessageHandler(filters.Document.ALL, self._handle_file),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
-        ]
-
-    def _setup_handlers(self):
-        for handler in self.handlers:
-            self.app.add_handler(handler)
-
-    async def _restore_data(self):
-        # Восстановление пользователей
-        self.bot_data.users = db.load_users()
-        self.bot_data.subscribed_users = {
-            uid for uid, ud in self.bot_data.users.items() if ud.notifications
-        }
-
-        # Восстановление расписания из Google Drive
-        if drive:
-            if orig_file := drive.download_latest("keste_bot_orig"):
-                self.bot_data.original_file = orig_file
-                db.save_data(pd.read_excel(orig_file), "original_schedule")
-            
-            if changes_file := drive.download_latest("keste_bot_ozgeris"):
-                self.bot_data.last_file = changes_file
-                db.save_data(pd.read_excel(changes_file), "changes_schedule")
-
-    # ... остальные методы обработчиков ...
-
-# ==================== FastAPI ====================
+# ==================== FastAPI приложение ====================
 app = FastAPI()
-bot = TelegramBot()
+bot_data = BotData()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await bot.initialize()
-    yield
-    await bot.shutdown()
+    try:
+        # Инициализация бота
+        application = Application.builder().token(config.TOKEN).build()
+        application.bot_data["bot_data"] = bot_data
+        
+        # Регистрация обработчиков
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("notify_on", notify_on))
+        application.add_handler(CommandHandler("notify_off", notify_off))
+        application.add_handler(MessageHandler(filters.Regex(r"^(Oqıtıwshı|Student)$"), handle_role))
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        # Восстановление данных
+        bot_data.users = db.load_users()
+        bot_data.subscribed_users = {uid for uid, ud in bot_data.users.items() if ud.notifications}
+        
+        await application.initialize()
+        await application.start()
+        
+        app.state.bot_app = application
+        yield
+    finally:
+        if hasattr(app.state, "bot_app"):
+            await app.state.bot_app.shutdown()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -334,8 +207,8 @@ async def webhook(token: str, request: Request):
         raise HTTPException(status_code=403)
     
     try:
-        update = Update.de_json(await request.json(), bot.app.bot)
-        await bot.app.process_update(update)
+        update = Update.de_json(await request.json(), app.state.bot_app.bot)
+        await app.state.bot_app.process_update(update)
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Webhook error: {e}")
